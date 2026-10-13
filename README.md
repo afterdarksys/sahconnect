@@ -2,6 +2,8 @@
 
 SSH and systemapi client.
 
+**sah** means Service Automation Hub. The hub encompasses the platform and the suite of utilities.
+
 `sahconnect api` calls the operator's systemapi. `sahconnect ssh` execs the `adssh` binary. This module does not embed an SSH stack and it is not an exploit tool.
 
 ```bash
