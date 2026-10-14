@@ -50,13 +50,11 @@ func (a *app) run(args []string) int {
 	case "logout":
 		return a.cmdLogout(args[1:])
 	case "connect":
-		return a.cmdConnect(args[1:])
+		return a.cmdConnect(args[1:], false)
 	}
-	if strings.HasPrefix(args[0], "-") || reserved[args[0]] {
-		usage()
-		return 2
-	}
-	return a.cmdConnect(args)
+	// The bare form: flags may come before or after the host. Reserved names
+	// never reach here as args[0]; cmdConnect refuses them as the host too.
+	return a.cmdConnect(args, true)
 }
 
 func usage() {

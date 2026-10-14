@@ -14,7 +14,7 @@ Module `github.com/afterdarksys/sahconnect`. Version 0.2.0.
 | `sahconnect ssh -- ARGS` | Execs `adssh`. |
 | `sahconnect version` | Prints the version. |
 
-**Subcommand names win.** `version`, `help`, `api`, `ssh`, `login`, `logout`, and `connect` are never read as a host name. A host with one of those names is reached with `sahconnect connect <name>`. An argument that starts with `-` is never read as a host name either.
+**Subcommand names win.** `version`, `help`, `api`, `ssh`, `login`, `logout`, and `connect` are never read as a host name. A host with one of those names is reached with `sahconnect connect <name>`. Flags may come before or after the host in both forms (`sahconnect --root web1`, `sahconnect web1 --root`); the first non-flag argument is the host.
 
 ## Config
 
@@ -108,7 +108,7 @@ For hosts you do not trust, use a terminal with OSC 52 reads and answerback disa
 | --- | --- |
 | The remote shell's status | `pty_exit` with reason `exited` and a code from 0 to 255. |
 | 255 | Any other `pty_exit` reason (`max_duration`, `agent_disconnected`, `stopped`), or `exited` with code -1. A message names the reason. |
-| 255 | A `pty_status` error. The code and an explanation are printed, for example `recording_unavailable`. `pty_start_failed` may be the per-user concurrent session limit. |
+| 255 | A `pty_status` error. The code and an explanation are printed, for example `recording_unavailable`, or `root_unavailable` when the host's agent cannot open root shells. `pty_start_failed` may be the per-user concurrent session limit. |
 | 255 | The socket closed before `pty_exit`, the handshake was refused, or TLS failed. |
 | 1 | Resolve or ticket refused, or an HTTP failure. A ticket `429 rate_limited` prints "too many terminal requests for this host; try again shortly" and is not retried. |
 | 2 | Usage, config, method, URL, or credential problem. |

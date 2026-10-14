@@ -403,3 +403,46 @@ func TestTicketRateLimitedExitsOne(t *testing.T) {
 		t.Fatalf("requests %d", n)
 	}
 }
+
+func TestFlagPlacement(t *testing.T) {
+	f := &cp{exit: 3}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	env := map[string]string{"XDG_CONFIG_HOME": t.TempDir(), "HOME": t.TempDir(), "SYSTEMAPI_URL": srv.URL, "SYSTEMAPI_API_KEY": "KEY-SENTINEL"}
+	cases := []struct {
+		args    []string
+		purpose string
+	}{
+		{[]string{"--root", "web1"}, "terminal:root"},
+		{[]string{"web1", "--root"}, "terminal:root"},
+		{[]string{"--method", "agent", "web1"}, "terminal:open"},
+		{[]string{"connect", "--root", "web1"}, "terminal:root"},
+	}
+	for _, tc := range cases {
+		a, _, errb, _ := testApp(t, env, "", false)
+		if code := a.run(tc.args); code != 3 {
+			t.Fatalf("%v: %d %s", tc.args, code, errb)
+		}
+		f.mu.Lock()
+		got := f.purposes[len(f.purposes)-1]
+		f.mu.Unlock()
+		if got != tc.purpose {
+			t.Fatalf("%v: purpose %s", tc.args, got)
+		}
+	}
+	before := count(f)
+	for _, args := range [][]string{{"--root", "login"}, {"--method", "agent", "api"}, {"--root"}, {"--bogus", "web1"}} {
+		a, _, _, _ := testApp(t, env, "", false)
+		if code := a.run(args); code != 2 {
+			t.Fatalf("%v: %d", args, code)
+		}
+	}
+	if count(f) != before {
+		t.Fatal("a refused invocation sent a request")
+	}
+	// The connect form still reaches a host named like a subcommand.
+	a, _, errb, _ := testApp(t, env, "", false)
+	if code := a.run([]string{"connect", "--root", "login"}); code != 3 {
+		t.Fatalf("connect login: %d %s", code, errb)
+	}
+}

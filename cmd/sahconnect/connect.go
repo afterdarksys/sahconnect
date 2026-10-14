@@ -125,7 +125,9 @@ func signalContext(onSignal func()) (context.Context, func()) {
 	}
 }
 
-func (a *app) cmdConnect(args []string) int {
+// cmdConnect runs connect. bare is the `sahconnect [flags] <host>` form, where
+// a subcommand name is never accepted as the host.
+func (a *app) cmdConnect(args []string, bare bool) int {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	root := fs.Bool("root", false, "open a root shell (purpose terminal:root, admin scope)")
@@ -133,6 +135,10 @@ func (a *app) cmdConnect(args []string) int {
 	name, err := parseOne(fs, args)
 	if err != nil {
 		a.errorf("%v", err)
+		return 2
+	}
+	if bare && reserved[name] {
+		a.errorf("%q is a subcommand name; use sahconnect connect %s", name, name)
 		return 2
 	}
 	cfg, err := config.Load(a.env)
