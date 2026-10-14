@@ -27,7 +27,7 @@ func privDir(t *testing.T) string {
 func TestWriteIsPrivateAtomicAndBound(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cfg", "sahconnect")
 	path := filepath.Join(dir, "token")
-	if err := Write(path, origin, secret); err != nil {
+	if err := Write(path, origin, secret, ""); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := os.Stat(path)
@@ -42,17 +42,17 @@ func TestWriteIsPrivateAtomicAndBound(t *testing.T) {
 		t.Fatalf("read %+v %v %v", got, found, err)
 	}
 	before, _ := os.Stat(path)
-	if err := Write(path, origin, secret+"X"); err != nil {
+	if err := Write(path, origin, secret+"X", ""); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(path)
 	if os.SameFile(before, after) {
 		t.Fatal("overwrite was in place, not an atomic rename")
 	}
-	if err := Write(path, origin, "short"); err == nil {
+	if err := Write(path, origin, "short", ""); err == nil {
 		t.Fatal("invalid token written")
 	}
-	if err := Write(path, "https://cp.example/path", secret); err == nil {
+	if err := Write(path, "https://cp.example/path", secret, ""); err == nil {
 		t.Fatal("non-origin accepted")
 	}
 	got, _, _ = Read(path)
@@ -86,7 +86,15 @@ func TestDirTightenedOrRefused(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(filepath.Join(dir, "token"), origin, secret); err != nil {
+	// Not sahconnect's directory: refused, mode untouched.
+	if err := Write(filepath.Join(dir, "token"), origin, secret, ""); err == nil || !strings.Contains(err.Error(), "chmod 700") {
+		t.Fatalf("unmanaged loose dir: %v", err)
+	}
+	if st, _ := os.Stat(dir); st.Mode().Perm() != 0o755 {
+		t.Fatalf("unmanaged dir mode changed: %o", st.Mode().Perm())
+	}
+	// sahconnect's own config dir: tightened.
+	if err := Write(filepath.Join(dir, "token"), origin, secret, dir); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := os.Stat(dir); st.Mode().Perm() != 0o700 {
@@ -101,7 +109,7 @@ func TestDirTightenedOrRefused(t *testing.T) {
 	}
 	secfile.CurrentUID = func() int { return os.Getuid() + 4242 }
 	defer func() { secfile.CurrentUID = os.Getuid }()
-	if err := Write(filepath.Join(privDir(t), "token"), origin, secret); err == nil {
+	if err := Write(filepath.Join(privDir(t), "token"), origin, secret, ""); err == nil {
 		t.Fatal("foreign dir accepted")
 	}
 }
@@ -109,7 +117,7 @@ func TestDirTightenedOrRefused(t *testing.T) {
 func TestReadRefusals(t *testing.T) {
 	dir := privDir(t)
 	path := filepath.Join(dir, "token")
-	if err := Write(path, origin, secret); err != nil {
+	if err := Write(path, origin, secret, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
@@ -134,12 +142,12 @@ func TestReadRefusals(t *testing.T) {
 func TestSymlinkSwappedInAtRead(t *testing.T) {
 	src := privDir(t)
 	target := filepath.Join(src, "token")
-	if err := Write(target, origin, secret); err != nil {
+	if err := Write(target, origin, secret, ""); err != nil {
 		t.Fatal(err)
 	}
 	dir := privDir(t)
 	path := filepath.Join(dir, "token")
-	if err := Write(path, origin, secret); err != nil {
+	if err := Write(path, origin, secret, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(path); err != nil {
@@ -154,7 +162,7 @@ func TestSymlinkSwappedInAtRead(t *testing.T) {
 	if _, err := Delete(path); err == nil {
 		t.Fatal("symlink deleted")
 	}
-	if err := Write(path, origin, secret); err == nil {
+	if err := Write(path, origin, secret, ""); err == nil {
 		t.Fatal("symlink replaced")
 	}
 }
@@ -166,7 +174,7 @@ func TestNeverClobbersOrDeletesNonToken(t *testing.T) {
 	if err := os.WriteFile(key, []byte(keyBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Write(key, origin, secret); err == nil {
+	if err := Write(key, origin, secret, ""); err == nil {
 		t.Fatal("clobbered a key file")
 	}
 	if removed, err := Delete(key); err == nil || removed {
@@ -185,7 +193,7 @@ func TestMissingAndDelete(t *testing.T) {
 	if removed, err := Delete(path); removed || err != nil {
 		t.Fatalf("delete missing: %v %v", removed, err)
 	}
-	if err := Write(path, origin, secret); err != nil {
+	if err := Write(path, origin, secret, ""); err != nil {
 		t.Fatal(err)
 	}
 	if removed, err := Delete(path); !removed || err != nil {
@@ -193,5 +201,54 @@ func TestMissingAndDelete(t *testing.T) {
 	}
 	if strings.Contains(Fingerprint(secret), secret) || len(Fingerprint(secret)) != 16 {
 		t.Fatal("fingerprint")
+	}
+}
+
+func TestHomeAndOtherDirsNeverChmodded(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	docs := filepath.Join(home, "Documents")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(home, ".config", "sahconnect")
+	for _, p := range []string{filepath.Join(home, "sahconnect-token"), filepath.Join(docs, "x")} {
+		err := Write(p, origin, secret, managed)
+		if err == nil || !strings.Contains(err.Error(), "move token_file") {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+			t.Fatalf("%s written", p)
+		}
+	}
+	for _, d := range []string{home, docs} {
+		if st, _ := os.Stat(d); st.Mode().Perm() != 0o755 {
+			t.Fatalf("%s mode changed to %o", d, st.Mode().Perm())
+		}
+	}
+	// A fresh managed dir is created 0700 and works.
+	if err := Write(filepath.Join(managed, "token"), origin, secret, managed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOldPlainFormatNamed(t *testing.T) {
+	path := filepath.Join(privDir(t), "token")
+	if err := os.WriteFile(path, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, err := range map[string]error{
+		"read":   func() error { _, _, err := Read(path); return err }(),
+		"write":  Write(path, origin, secret, ""),
+		"delete": func() error { _, err := Delete(path); return err }(),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "old format; delete "+path+" by hand") || strings.Contains(err.Error(), secret) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if b, _ := os.ReadFile(path); string(b) != secret+"\n" {
+		t.Fatal("old token file changed")
 	}
 }

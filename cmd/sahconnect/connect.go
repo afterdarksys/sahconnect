@@ -287,7 +287,12 @@ func (a *app) cmdLogin(args []string) int {
 		a.errorf("login failed: %v", err)
 		return 1
 	}
-	if err := token.Write(cfg.TokenFile, token.Origin(base), res.Token); err != nil {
+	managed, err := config.Dir(a.env)
+	if err != nil {
+		a.errorf("%v", err)
+		return 1
+	}
+	if err := token.Write(cfg.TokenFile, token.Origin(base), res.Token, managed); err != nil {
 		a.errorf("%v", err)
 		return 1
 	}

@@ -60,7 +60,8 @@ sahconnect login --url https://systemapi.example --username alice
 2. **Approve.** sahconnect prints the verification URL and the code on stderr. Open the URL and approve it. The URL must be on the same origin as the control plane, at `/oauth/device/verify`. Otherwise login stops with `url_rejected`.
 3. **Poll.** sahconnect polls `/oauth/token` with the device grant at the server's interval, clamped to 5–300 s (0 means 5 s). `slow_down` adds 5 s to the interval. `expired_token`, `access_denied`, and `invalid_grant` end the login with a non-zero exit. The wait is capped at the code's lifetime, which is 10 minutes.
 4. **Store.** The bearer token and the origin are written to `token_file`:
-   - mode 0600, in a directory you own, which is set to 0700;
+   - mode 0600, in a directory you own with mode 0700. sahconnect creates a missing directory 0700, and tightens only its own config directory. Any other existing directory that is not 0700 (your home, for example) is refused: `chmod 700` it or move `token_file`;
+   - a token file in the plain-text format from before origin binding is refused with "old format; delete <path> by hand";
    - atomically, through a temp file that is fsynced and renamed;
    - an existing file is replaced only if it is a valid token file. A mistyped `token_file` such as `~/.ssh/id_ed25519` is refused, never overwritten. `logout` has the same rule and never deletes a file that is not a token file.
 

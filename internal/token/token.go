@@ -161,6 +161,9 @@ func readAt(path string) (f *File, found bool, err error) {
 		return nil, true, fmt.Errorf("token file: %w", err)
 	}
 	tf, perr := parse(b)
+	if perr != nil && Valid(strings.TrimSuffix(string(b), "\n")) {
+		return nil, true, fmt.Errorf("token file %s is in an old format; delete %s by hand, then run sahconnect login", path, path)
+	}
 	if perr != nil {
 		return nil, true, fmt.Errorf("token file %s is not a sahconnect token file (run sahconnect login, or fix token_file)", path)
 	}
@@ -179,10 +182,13 @@ func Read(path string) (*File, bool, error) {
 	return readAt(path)
 }
 
-// Write stores the token for origin at path, mode 0600, atomically. The
-// directory is created 0700, or tightened to 0700 when the user owns it. An
-// existing file is replaced only when it is a valid token file.
-func Write(path, origin, tok string) error {
+// Write stores the token for origin at path, mode 0600, atomically. A missing
+// directory is created 0700. An existing directory is tightened to 0700 only
+// when it is managedDir (sahconnect's own config directory); any other
+// directory that is not already 0700 is refused, so a token_file in $HOME
+// never chmods $HOME. An existing file is replaced only when it is a valid
+// token file.
+func Write(path, origin, tok, managedDir string) error {
 	if !filepath.IsAbs(path) {
 		return errors.New("token file path must be absolute")
 	}
@@ -190,6 +196,8 @@ func Write(path, origin, tok string) error {
 		return errors.New("token rejected")
 	}
 	dir := filepath.Dir(path)
+	_, statErr := os.Lstat(dir)
+	created := errors.Is(statErr, os.ErrNotExist)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("token directory: %w", err)
 	}
@@ -201,6 +209,9 @@ func Write(path, origin, tok string) error {
 		return fmt.Errorf("token directory %s is not a directory owned by you", dir)
 	}
 	if fi.Mode().Perm() != 0o700 {
+		if !created && (managedDir == "" || filepath.Clean(managedDir) != dir) {
+			return fmt.Errorf("token directory %s is mode %04o, not 0700: chmod 700 %s or move token_file", dir, fi.Mode().Perm(), dir)
+		}
 		if err := os.Chmod(dir, 0o700); err != nil {
 			return fmt.Errorf("token directory: %w", err)
 		}
