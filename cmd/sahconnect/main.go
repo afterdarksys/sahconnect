@@ -9,15 +9,27 @@ import (
 	"time"
 
 	"github.com/afterdarksys/sahconnect/internal/client"
+	"github.com/afterdarksys/sahconnect/internal/config"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+// reserved are the subcommand names. A host with one of these names is
+// reached with `sahconnect connect <name>`; the bare form never shadows them.
+var reserved = map[string]bool{
+	"version": true, "help": true, "api": true, "ssh": true,
+	"login": true, "logout": true, "connect": true,
+}
+
 func run(args []string) int {
+	return defaultApp().run(args)
+}
+
+func (a *app) run(args []string) int {
 	if len(args) == 0 {
 		usage()
 		return 2
@@ -30,44 +42,65 @@ func run(args []string) int {
 		usage()
 		return 0
 	case "api":
-		return cmdAPI(args[1:])
+		return a.cmdAPI(args[1:])
 	case "ssh":
 		return cmdSSH(args[1:])
-	default:
+	case "login":
+		return a.cmdLogin(args[1:])
+	case "logout":
+		return a.cmdLogout(args[1:])
+	case "connect":
+		return a.cmdConnect(args[1:])
+	}
+	if strings.HasPrefix(args[0], "-") || reserved[args[0]] {
 		usage()
 		return 2
 	}
+	return a.cmdConnect(args)
 }
 
 func usage() {
 	fmt.Fprint(os.Stderr, `sahconnect `+version+` — SSH and systemapi client
 
-  sahconnect version
+  sahconnect <host> [--root] [--method agent]
+  sahconnect connect <host> [--root] [--method agent]
+  sahconnect login [--url URL] [--username USER]
+  sahconnect logout
   sahconnect api METHOD /path [?query]
   sahconnect ssh -- [adssh arguments]
+  sahconnect version
 
-SYSTEMAPI_URL and SYSTEMAPI_API_KEY are required for api.
-The key is sent as X-API-Key and is not printed.
-http is accepted only for loopback. ssh executes the adssh binary.
+<host> is a hostname or host_id. A host named like a subcommand
+(version, help, api, ssh, login, logout, connect) needs "connect <host>".
+
+Config: $XDG_CONFIG_HOME/sahconnect/config.toml (default ~/.config/sahconnect),
+or SAHCONNECT_CONFIG. SYSTEMAPI_URL overrides systemapi_url.
+Credentials: the token file from "sahconnect login" (Authorization: Bearer),
+else SYSTEMAPI_API_KEY (X-API-Key). Neither is printed.
+http and ws are accepted only for loopback. ssh executes the adssh binary.
 `)
 }
 
-func cmdAPI(args []string) int {
+func (a *app) cmdAPI(args []string) int {
 	if len(args) < 2 || len(args) > 3 {
 		usage()
 		return 2
 	}
-	baseRaw := os.Getenv("SYSTEMAPI_URL")
-	key := os.Getenv("SYSTEMAPI_API_KEY")
-	if strings.TrimSpace(baseRaw) == "" {
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 2
+	}
+	if strings.TrimSpace(cfg.SystemAPIURL) == "" {
 		fmt.Fprintln(os.Stderr, "missing SYSTEMAPI_URL")
 		return 2
 	}
-	if strings.TrimSpace(key) == "" {
-		fmt.Fprintln(os.Stderr, "missing SYSTEMAPI_API_KEY")
+	auth, err := loadAuth(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
 		return 2
 	}
-	base, err := client.ValidateBase(baseRaw)
+	base, err := client.ValidateBase(cfg.SystemAPIURL)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		return 2
@@ -98,7 +131,8 @@ func cmdAPI(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	status, resp, err := client.Do(ctx, base, key, args[0], path, query, body)
+	c := &client.Client{Base: base, Auth: auth}
+	status, resp, err := c.Do(ctx, args[0], path, query, body)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		return 1

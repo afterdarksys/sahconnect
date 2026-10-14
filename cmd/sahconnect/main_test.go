@@ -14,6 +14,8 @@ func TestVersionUsageAndURLGuards(t *testing.T) {
 	if run(nil) != 2 {
 		t.Fatal("usage")
 	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no token file, no config file
+	t.Setenv("SAHCONNECT_CONFIG", "")
 	t.Setenv("SYSTEMAPI_URL", "")
 	t.Setenv("SYSTEMAPI_API_KEY", "secret-key-value")
 	if run([]string{"api", "GET", "/api/v1/fleet"}) != 2 {
