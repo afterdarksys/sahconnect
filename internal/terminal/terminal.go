@@ -61,7 +61,7 @@ func (s Size) Valid() bool { return s.Rows >= 1 && s.Rows <= 1000 && s.Cols >= 1
 type Options struct {
 	URL              *url.URL     // from client.TerminalURL
 	HTTP             *http.Client // guarded client with Timeout 0
-	Stdin            io.Reader // read until EOF; see the package note on reuse
+	Stdin            io.Reader    // read until EOF; see the package note on reuse
 	Stdout           io.Writer
 	Resize           <-chan Size // window changes; may be nil
 	HandshakeTimeout time.Duration
