@@ -1,8 +1,11 @@
 // Package config loads sahconnect's client configuration.
 //
 // Threats: a config file another local user can write could point sahconnect
-// at a hostile control plane or redirect the token file, so a group- or
-// world-writable file (or one that is not a regular file) is refused. Unknown
+// at a hostile control plane or redirect the token file. The file is opened
+// with O_NOFOLLOW and checked on the open descriptor: it must be a regular
+// file owned by the current user (or root), not group- or world-writable, in
+// a directory that is not group- or world-writable. token_file must lie
+// inside the home or the sahconnect config directory. Unknown
 // keys are refused so a typo cannot silently drop a setting. The file holds
 // no secret: the API key comes only from the environment and the bearer only
 // from the token file. Does NOT protect against a user who controls the
@@ -12,12 +15,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/afterdarksys/sahconnect/internal/secfile"
 )
 
 // Methods.
@@ -106,13 +112,9 @@ func Dir(env Env) (string, error) {
 		}
 		return filepath.Join(x, "sahconnect"), nil
 	}
-	home := env("HOME")
-	if home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil || h == "" {
-			return "", errors.New("cannot find the home directory")
-		}
-		home = h
+	home, err := homeDir(env)
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(home, ".config", "sahconnect"), nil
 }
@@ -154,6 +156,10 @@ func Load(env Env) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		home, herr := homeDir(env)
+		if herr != nil || !(within(tf, home) || within(tf, dir)) {
+			return nil, fmt.Errorf("token_file %s: must be inside the home or sahconnect config directory", tf)
+		}
 		cfg.TokenFile = tf
 	}
 	if v := env("SYSTEMAPI_URL"); v != "" {
@@ -164,23 +170,24 @@ func Load(env Env) (*Config, error) {
 }
 
 func readFile(path string, f *file) error {
-	st, err := os.Stat(path)
+	fh, st, err := secfile.OpenNoFollow(path, true)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return fmt.Errorf("config %s: %w", path, err)
+		return fmt.Errorf("config: %w", err)
 	}
-	if !st.Mode().IsRegular() {
-		return fmt.Errorf("config %s: not a regular file", path)
-	}
+	defer fh.Close()
 	if st.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("config %s: refusing a group- or world-writable file (chmod go-w)", path)
 	}
 	if st.Size() > 64<<10 {
 		return fmt.Errorf("config %s: larger than 64 KiB", path)
 	}
-	md, err := toml.DecodeFile(path, f)
+	if _, err := secfile.CheckDir(filepath.Dir(path), true); err != nil {
+		return fmt.Errorf("config %s: %w", path, err)
+	}
+	md, err := toml.NewDecoder(io.LimitReader(fh, 64<<10)).Decode(f)
 	if err != nil {
 		return fmt.Errorf("config %s: %w", path, err)
 	}
@@ -195,15 +202,28 @@ func readFile(path string, f *file) error {
 	return nil
 }
 
+func homeDir(env Env) (string, error) {
+	if h := env("HOME"); h != "" {
+		return h, nil
+	}
+	h, err := os.UserHomeDir()
+	if err != nil || h == "" {
+		return "", errors.New("cannot find the home directory")
+	}
+	return h, nil
+}
+
+// within reports whether p is strictly inside root.
+func within(p, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
 func expandHome(p string, env Env) (string, error) {
 	if p == "~" || strings.HasPrefix(p, "~/") {
-		home := env("HOME")
-		if home == "" {
-			h, err := os.UserHomeDir()
-			if err != nil {
-				return "", errors.New("token_file: cannot expand ~")
-			}
-			home = h
+		home, err := homeDir(env)
+		if err != nil {
+			return "", errors.New("token_file: cannot expand ~")
 		}
 		p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 	}

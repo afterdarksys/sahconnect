@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/afterdarksys/sahconnect/internal/secfile"
 )
 
 func envMap(m map[string]string) Env { return func(k string) string { return m[k] } }
@@ -151,6 +153,44 @@ func TestParseMethods(t *testing.T) {
 	for _, in := range []string{"", "agent,", "mosh", "agent,agent"} {
 		if _, err := ParseMethods([]string{in}); err == nil {
 			t.Fatalf("%q accepted", in)
+		}
+	}
+}
+
+func TestSymlinkForeignOwnerAndParentRefused(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.toml")
+	write(t, real, `systemapi_url = "https://cp.example"`, 0o600)
+	link := filepath.Join(dir, "link.toml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(envMap(map[string]string{"SAHCONNECT_CONFIG": link, "HOME": dir})); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink config: %v", err)
+	}
+	secfile.CurrentUID = func() int { return os.Getuid() + 4242 }
+	_, err := Load(envMap(map[string]string{"SAHCONNECT_CONFIG": real, "HOME": dir}))
+	secfile.CurrentUID = os.Getuid
+	if err == nil || !strings.Contains(err.Error(), "another user") {
+		t.Fatalf("foreign config: %v", err)
+	}
+	shared := filepath.Join(t.TempDir(), "shared")
+	write(t, filepath.Join(shared, "c.toml"), `systemapi_url = "https://cp.example"`, 0o600)
+	if err := os.Chmod(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(envMap(map[string]string{"SAHCONNECT_CONFIG": filepath.Join(shared, "c.toml"), "HOME": dir})); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("writable parent: %v", err)
+	}
+}
+
+func TestTokenFileMustStayHome(t *testing.T) {
+	home := t.TempDir()
+	for _, tf := range []string{"/etc/sahconnect-token", "~/../elsewhere", home, "~"} {
+		p := filepath.Join(t.TempDir(), "c.toml")
+		write(t, p, `token_file = "`+tf+`"`, 0o600)
+		if _, err := Load(envMap(map[string]string{"SAHCONNECT_CONFIG": p, "HOME": home})); err == nil {
+			t.Fatalf("token_file %s accepted", tf)
 		}
 	}
 }
