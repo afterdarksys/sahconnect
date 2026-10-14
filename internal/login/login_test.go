@@ -25,6 +25,7 @@ type fake struct {
 	responses []func(w http.ResponseWriter) // one per /oauth/token poll
 	polls     int
 	verifyURL string // override
+	interval  *int
 	startCode int
 	forms     []url.Values
 }
@@ -51,8 +52,12 @@ func (f *fake) handler(base *string) http.Handler {
 			if f.verifyURL != "" {
 				vu = f.verifyURL
 			}
+			iv := 5
+			if f.interval != nil {
+				iv = *f.interval
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"device_code": deviceCode, "verification_url": vu, "expires_in": 600, "interval": 5,
+				"device_code": deviceCode, "verification_url": vu, "expires_in": 600, "interval": iv,
 			})
 		case "/oauth/token":
 			if r.PostForm.Get("grant_type") != DeviceGrant || r.PostForm.Get("device_code") != deviceCode {
@@ -239,5 +244,26 @@ func TestRedirectRefused(t *testing.T) {
 	flow := &Flow{Base: u, Username: "user-1", HTTP: client.NewHTTPClient(nil, 5*time.Second)}
 	if _, err := flow.Run(context.Background()); ErrCode(err) != "redirect_denied" {
 		t.Fatalf("redirect: %v", err)
+	}
+}
+
+func TestIntervalClamped(t *testing.T) {
+	cases := map[int][]time.Duration{
+		0:       {5 * time.Second, 10 * time.Second},
+		-3:      {5 * time.Second, 10 * time.Second},
+		120:     {120 * time.Second, 125 * time.Second},
+		400:     {300 * time.Second, 300 * time.Second},
+		1 << 62: {300 * time.Second, 300 * time.Second},
+	}
+	for iv, want := range cases {
+		iv := iv
+		f := &fake{interval: &iv, responses: []func(http.ResponseWriter){oauthErr("slow_down"), success}}
+		_, err, sleeps, _ := run(t, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sleeps) != 2 || sleeps[0] != want[0] || sleeps[1] != want[1] {
+			t.Fatalf("interval %d: sleeps %v want %v", iv, sleeps, want)
+		}
 	}
 }

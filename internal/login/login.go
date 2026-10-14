@@ -7,8 +7,8 @@
 // not carry device_code or access_token, so a hostile response cannot send the
 // user elsewhere. The HTTP client is the guarded one (TLS 1.3, no proxy, no
 // redirects); response bodies are capped at 64 KiB. Polling honors the
-// server's interval and slows by 5 s on slow_down. Any unexpected status or
-// body fails closed. Does NOT verify who approves the code: a stolen
+// server's interval clamped to 5-300 s and slows by 5 s on slow_down. Any
+// unexpected status or body fails closed. Does NOT verify who approves the code: a stolen
 // verification URL inside its 10-minute TTL is consent (see oauth.js).
 package login
 
@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/afterdarksys/sahconnect/internal/client"
 	"github.com/afterdarksys/sahconnect/internal/token"
 )
 
@@ -133,12 +134,11 @@ func (f *Flow) Run(ctx context.Context) (*Result, error) {
 		maxWait = time.Duration(start.ExpiresIn) * time.Second
 	}
 	deadline := time.Now().Add(maxWait)
-	interval := 5 * time.Second
-	if start.Interval > 0 && start.Interval <= 60 {
-		interval = time.Duration(start.Interval) * time.Second
-	} else if start.Interval == 0 {
-		interval = time.Second // oauth.js sends 0 only under NODE_ENV=test
+	secs := start.Interval
+	if secs > 300 {
+		secs = 300 // also keeps the multiplication below from overflowing
 	}
+	interval := clampInterval(time.Duration(secs) * time.Second)
 	if f.Show != nil {
 		f.Show(Prompt{VerificationURL: start.VerificationURL, Code: userCode, ExpiresIn: maxWait})
 	}
@@ -162,12 +162,30 @@ func (f *Flow) Run(ctx context.Context) (*Result, error) {
 		case status == http.StatusBadRequest && c == "authorization_pending":
 			continue
 		case (status == http.StatusBadRequest && c == "slow_down") || status == http.StatusTooManyRequests:
-			interval += 5 * time.Second
+			interval = clampInterval(interval + 5*time.Second)
 			continue
 		default:
 			return nil, statusError(status, body, "device_login_failed")
 		}
 	}
+}
+
+// Poll interval bounds. The server's interval is honored inside them; 0 (or
+// anything below) becomes 5 s, and a hostile or broken server cannot stretch
+// the wait past 300 s.
+const (
+	minInterval = 5 * time.Second
+	maxInterval = 300 * time.Second
+)
+
+func clampInterval(d time.Duration) time.Duration {
+	if d < minInterval {
+		return minInterval
+	}
+	if d > maxInterval {
+		return maxInterval
+	}
+	return d
 }
 
 func waitUntil(ctx context.Context, sleep func(context.Context, time.Duration) error, deadline time.Time, d time.Duration) error {
@@ -234,7 +252,7 @@ func (f *Flow) post(ctx context.Context, path string, form url.Values) (int, []b
 	req.Header.Set("Accept", "application/json")
 	resp, err := f.HTTP.Do(req)
 	if err != nil {
-		if strings.Contains(err.Error(), "redirect_denied") {
+		if errors.Is(err, client.ErrRedirect) {
 			return 0, nil, fail("redirect_denied")
 		}
 		if ctx.Err() != nil {
