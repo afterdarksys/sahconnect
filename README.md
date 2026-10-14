@@ -18,9 +18,9 @@ sahconnect api GET /api/v1/fleet      # SYSTEMAPI_API_KEY works too, for automat
 sahconnect ssh -- version
 ```
 
-- **Credentials.** The token file is sent as `Authorization: Bearer`. Without it, `SYSTEMAPI_API_KEY` is sent as `X-API-Key`. Neither is printed, and neither goes in a URL.
+- **Credentials.** The token file records the origin that issued it, and its bearer goes only to that origin, as `Authorization: Bearer`. Otherwise `SYSTEMAPI_API_KEY` is sent as `X-API-Key`. Neither is printed, and neither goes in a URL.
 - **Transport.** Plain `http` and `ws` are accepted only for loopback. Everything else is TLS 1.3 with system CAs, no proxy, and no redirects.
-- **Config.** `~/.config/sahconnect/config.toml`, which respects `XDG_CONFIG_HOME` and `SAHCONNECT_CONFIG`. A group- or world-writable config is refused.
+- **Config.** `~/.config/sahconnect/config.toml`, which respects `XDG_CONFIG_HOME` and `SAHCONNECT_CONFIG`. A symlinked config, one owned by someone else, or one that others can write is refused.
 - **Phase 1.** Only `method = agent` runs. `ssh` arrives in phase 3, behind a signed connect policy.
 - **Host names.** A host named like a subcommand (`version`, `help`, `api`, `ssh`, `login`, `logout`, `connect`) needs `sahconnect connect <name>`.
 

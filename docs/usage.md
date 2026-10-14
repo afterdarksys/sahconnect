@@ -26,21 +26,29 @@ method = ["agent"]               # or "agent", "ssh", "agent,ssh"
 token_file = "~/.config/sahconnect/token"   # the default
 ```
 
-- **Writable by others: refused.** A config file that is group- or world-writable, or is not a regular file, is refused. Fix it with `chmod go-w`.
+- **Untrusted file: refused.** The config is opened without following symlinks and checked on the open file. It must be a regular file owned by you (or root), not group- or world-writable, in a directory that is not group- or world-writable. Fix the mode with `chmod go-w`.
 - **Unknown keys: refused.** So a typo cannot silently drop a setting.
 - **Environment beats the file.** `SYSTEMAPI_URL` overrides `systemapi_url`. `SYSTEMAPI_API_KEY` is read only from the environment. The file holds no secret.
 - **`method`.** The list orders the client's preference. Each entry is `agent` or `ssh`, with no duplicates. Phase 1 runs only `agent`. A list without `agent` fails with "not available until phase 3". `agent,ssh` runs `agent`, and an agent failure never falls back to ssh. Falling back needs the signed connect policy, which arrives in phase 2.
-- **`token_file`.** An absolute path, or one that starts with `~/`.
+- **`token_file`.** An absolute path, or one that starts with `~/`, inside your home directory or the sahconnect config directory. Anything else is refused.
 
 ## Credentials
 
-1. **The token file wins.** If the token file exists, sahconnect sends `Authorization: Bearer <token>`.
-2. **Otherwise the API key.** Without a token file, `SYSTEMAPI_API_KEY` is sent as `X-API-Key`.
-3. **Exactly one credential per request.** It never goes in a query string, and it is never printed.
+The token file is JSON: `{"v":1,"origin":"https://systemapi.example","token":"…"}`. The origin is the control plane that issued the token, as `scheme://host[:port]` (lower case, default port dropped).
 
-A token file that exists but is readable or writable by others, is not a regular file (a symlink, for example), or holds an invalid token is an error. sahconnect does not fall back to the API key in that case.
+| Token file | `SYSTEMAPI_API_KEY` | Sent |
+| --- | --- | --- |
+| For this origin | unset | `Authorization: Bearer` |
+| For this origin | set | `Authorization: Bearer`, and stderr says the bearer won |
+| For another origin | set | `X-API-Key`, and stderr says why. The bearer is never sent. |
+| For another origin | unset | Nothing. Error: log in to this origin, or set the key. |
+| None | set | `X-API-Key` |
+| None | unset | Nothing. Error: not logged in. |
 
-This precedence applies to `connect` and `api`.
+- **One credential per request.** It never goes in a query string, and it is never printed. The client refuses a bearer whose origin differs from the request's, as a second check.
+- **A broken token file is an error.** If the file exists but is a symlink, is not a regular file, is not owned by you, has any group or other permission bit, sits in a directory that is not yours or not 0700, or does not parse, sahconnect stops. It does not fall back to the API key.
+
+This applies to `connect` and `api`.
 
 ## Login
 
@@ -50,11 +58,11 @@ sahconnect login --url https://systemapi.example --username alice
 
 1. **Start.** sahconnect POSTs `username` to `/oauth/device` (`controlplane/oauth.js`). The username must be a member. It defaults to `$USER`. The URL defaults to `SYSTEMAPI_URL` or `systemapi_url`.
 2. **Approve.** sahconnect prints the verification URL and the code on stderr. Open the URL and approve it. The URL must be on the same origin as the control plane, at `/oauth/device/verify`. Otherwise login stops with `url_rejected`.
-3. **Poll.** sahconnect polls `/oauth/token` with the device grant at the server's interval. `slow_down` adds 5 s to the interval. `expired_token`, `access_denied`, and `invalid_grant` end the login with a non-zero exit. The wait is capped at the code's lifetime, which is 10 minutes.
-4. **Store.** The bearer token is written to `token_file`:
-   - mode 0600, in a 0700 directory;
+3. **Poll.** sahconnect polls `/oauth/token` with the device grant at the server's interval, clamped to 5–300 s (0 means 5 s). `slow_down` adds 5 s to the interval. `expired_token`, `access_denied`, and `invalid_grant` end the login with a non-zero exit. The wait is capped at the code's lifetime, which is 10 minutes.
+4. **Store.** The bearer token and the origin are written to `token_file`:
+   - mode 0600, in a directory you own, which is set to 0700;
    - atomically, through a temp file that is fsynced and renamed;
-   - a group- or world-writable directory is refused.
+   - an existing file is replaced only if it is a valid token file. A mistyped `token_file` such as `~/.ssh/id_ed25519` is refused, never overwritten. `logout` has the same rule and never deletes a file that is not a token file.
 
    sahconnect prints the file path and a 16-character SHA-256 fingerprint. It never prints the token.
 5. **Expiry.** The server issues the token for one hour. When it expires, requests fail with 403; run `sahconnect login` again.
@@ -74,7 +82,7 @@ The steps follow the terminal protocol, `~/development/systemapi.io/docs/sahconn
    - TLS 1.3 or newer, with the system CA pool.
    - No proxy and no redirects.
    - Plain `ws://` only for a loopback origin.
-   - Metadata and link-local hosts are refused.
+   - Metadata and link-local hosts are refused, both in the URL and at dial time against the resolved address, so DNS rebinding to them fails. The same dial check covers every HTTP call.
    - The socket sends no credential header. The ticket is its authentication.
 4. **Raw mode.** When stdin is a terminal, it goes into raw mode. sahconnect restores it on exit, on error, on panic, and on SIGINT, SIGTERM, or SIGHUP. Piped stdin works without raw mode: `echo uptime | sahconnect web1`.
 5. **Frames.**
@@ -82,6 +90,16 @@ The steps follow the terminal protocol, `~/development/systemapi.io/docs/sahconn
    - SIGWINCH goes out as `pty_resize`.
    - stdin EOF goes out as `pty_eof`.
    - Binary frames from the server go to stdout.
+
+### Remote output is not filtered
+
+Binary frames are written to your terminal unchanged, as ssh does. A compromised host or control plane can send escape sequences:
+
+- OSC 52 can set, and on some terminals read, your clipboard;
+- answerback and status reports can inject bytes into your input;
+- other sequences can rewrite the screen to mislead.
+
+For hosts you do not trust, use a terminal with OSC 52 reads and answerback disabled.
 
 ### Exit codes
 
