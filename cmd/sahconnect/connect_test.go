@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 	"golang.org/x/term"
@@ -124,7 +126,8 @@ func testApp(t *testing.T, env map[string]string, stdin string, isTTY bool) (*ap
 			MakeRaw:    func(int) (*term.State, error) { rec.raw++; return &term.State{}, nil },
 			Restore:    func(int, *term.State) error { rec.restored++; return nil },
 		},
-		env: func(k string) string { return env[k] },
+		env:   func(k string) string { return env[k] },
+		sleep: func(context.Context, time.Duration) error { return nil },
 	}, out, errb, rec
 }
 
@@ -133,7 +136,7 @@ func TestLoginConnectLogout(t *testing.T) {
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	xdg := t.TempDir()
-	env := map[string]string{"XDG_CONFIG_HOME": xdg, "SYSTEMAPI_URL": srv.URL, "SYSTEMAPI_API_KEY": "KEY-SENTINEL", "USER": "user-1"}
+	env := map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": xdg, "SYSTEMAPI_URL": srv.URL, "SYSTEMAPI_API_KEY": "KEY-SENTINEL", "USER": "user-1"}
 
 	a, out, errb, _ := testApp(t, env, "", false)
 	if code := a.run([]string{"login"}); code != 0 {
@@ -257,5 +260,126 @@ func TestMethodAndDispatchRules(t *testing.T) {
 	a, _, _, _ = testApp(t, env, "", false)
 	if code := a.run([]string{"web1"}); code != 2 {
 		t.Fatal("plain http accepted")
+	}
+}
+
+func count(f *cp) int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.auths) }
+
+func TestBearerStaysWithItsOrigin(t *testing.T) {
+	prod := &cp{exit: 0}
+	prodSrv := httptest.NewServer(prod)
+	defer prodSrv.Close()
+	staging := &cp{exit: 0}
+	stagingSrv := httptest.NewServer(staging)
+	defer stagingSrv.Close()
+	xdg := t.TempDir()
+	env := map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": xdg, "USER": "user-1"}
+
+	a, _, errb, _ := testApp(t, env, "", false)
+	if code := a.run([]string{"login", "--url", prodSrv.URL}); code != 0 {
+		t.Fatalf("login %d %s", code, errb)
+	}
+	// Prod token, staging URL, no key: refused, nothing reaches staging.
+	env["SYSTEMAPI_URL"] = stagingSrv.URL
+	a, _, errb, _ = testApp(t, env, "", false)
+	if code := a.run([]string{"web1"}); code != 2 || !strings.Contains(errb.String(), "token file is for") {
+		t.Fatalf("mismatch connect %d %s", code, errb)
+	}
+	a, _, errb, _ = testApp(t, env, "", false)
+	if code := a.cmdAPI([]string{"GET", "/api/v1/fleet"}); code != 2 {
+		t.Fatalf("mismatch api %d %s", code, errb)
+	}
+	if count(staging) != 0 {
+		t.Fatal("a request reached staging")
+	}
+	// Prod token, staging URL, explicit key: the key is used, never the bearer.
+	env["SYSTEMAPI_API_KEY"] = "KEY-SENTINEL"
+	a, _, errb, _ = testApp(t, env, "", false)
+	if code := a.run([]string{"web1"}); code != 0 || !strings.Contains(errb.String(), "credential: SYSTEMAPI_API_KEY") {
+		t.Fatalf("key fallback %d %s", code, errb)
+	}
+	staging.mu.Lock()
+	for _, au := range staging.auths {
+		if au != "|KEY-SENTINEL" {
+			t.Fatalf("staging saw %q", au)
+		}
+	}
+	staging.mu.Unlock()
+	// Same origin with both set: bearer wins and the choice is stated.
+	env["SYSTEMAPI_URL"] = prodSrv.URL
+	a, _, errb, _ = testApp(t, env, "", false)
+	if code := a.run([]string{"web1"}); code != 0 || !strings.Contains(errb.String(), "credential: bearer") {
+		t.Fatalf("same origin %d %s", code, errb)
+	}
+}
+
+func TestBrokenTokenFileNeverFallsBackToKey(t *testing.T) {
+	f := &cp{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	xdg := t.TempDir()
+	env := map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": xdg, "SYSTEMAPI_URL": srv.URL, "SYSTEMAPI_API_KEY": "KEY-SENTINEL", "USER": "user-1"}
+	a, _, errb, _ := testApp(t, env, "", false)
+	if code := a.run([]string{"login"}); code != 0 {
+		t.Fatalf("login %d %s", code, errb)
+	}
+	before := count(f)
+	tok := filepath.Join(xdg, "sahconnect", "token")
+	if err := os.Chmod(tok, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"web1"}, {"api", "GET", "/api/v1/fleet"}} {
+		a, _, errb, _ = testApp(t, env, "", false)
+		if code := a.run(args); code != 2 || strings.Contains(errb.String(), testBearer) {
+			t.Fatalf("0644 %v: %d %s", args, code, errb)
+		}
+	}
+	if err := os.WriteFile(tok, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tok, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, _, _, _ = testApp(t, env, "", false)
+	if code := a.run([]string{"web1"}); code != 2 {
+		t.Fatalf("corrupt token: %d", code)
+	}
+	if count(f) != before {
+		t.Fatal("a request was sent despite a broken token file")
+	}
+}
+
+func TestTokenFileOnANonTokenFile(t *testing.T) {
+	f := &cp{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(sshDir, "id_ed25519")
+	keyBody := "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+	if err := os.WriteFile(key, []byte(keyBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(home, ".config", "sahconnect")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(`token_file = "~/.ssh/id_ed25519"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"HOME": home, "SYSTEMAPI_URL": srv.URL, "USER": "user-1"}
+	a, _, errb, _ := testApp(t, env, "", false)
+	if code := a.run([]string{"login"}); code == 0 {
+		t.Fatalf("login clobbered a key: %s", errb)
+	}
+	a, _, errb, _ = testApp(t, env, "", false)
+	if code := a.run([]string{"logout"}); code == 0 {
+		t.Fatalf("logout deleted a key: %s", errb)
+	}
+	if b, err := os.ReadFile(key); err != nil || string(b) != keyBody {
+		t.Fatal("the key file changed")
 	}
 }

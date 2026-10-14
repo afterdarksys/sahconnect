@@ -6,7 +6,10 @@
 // Redirects are refused and the environment proxy is ignored. Query keys
 // api_key, access_token, token, and device_code are refused. The terminal
 // ticket is the only query secret, it is single-use, and it is never printed.
-// Resolve and Ticket validate host names and host ids against
+// The bearer is bound to the origin that issued it and is refused for any
+// other origin. Every dial re-checks the resolved address (DialGuard), which
+// defeats DNS rebinding to metadata or link-local addresses. Resolve and
+// Ticket validate host names and host ids against
 // [A-Za-z0-9._-]{1,253} before they reach a URL. Does NOT open a shell itself;
 // sahconnect ssh executes the adssh binary the operator already has.
 package client
@@ -24,7 +27,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/afterdarksys/sahconnect/internal/token"
 )
 
 const maxBody = 256 << 10
@@ -144,10 +150,12 @@ var methods = map[string]struct{}{
 }
 
 // Auth carries the credential for one request. Bearer is the device-login
-// token and wins when both are set. APIKey is sent as X-API-Key.
+// token and wins when both are set; it is sent only when BearerOrigin equals
+// the request's origin. APIKey is sent as X-API-Key.
 type Auth struct {
-	Bearer string
-	APIKey string
+	Bearer       string
+	BearerOrigin string // canonical origin the bearer was issued by
+	APIKey       string
 }
 
 func validSecret(s string) bool {
@@ -162,11 +170,14 @@ func validSecret(s string) bool {
 	return true
 }
 
-func (a Auth) apply(h http.Header) error {
+func (a Auth) apply(h http.Header, base *url.URL) error {
 	switch {
 	case a.Bearer != "":
 		if !validSecret(a.Bearer) {
 			return code("token_rejected")
+		}
+		if a.BearerOrigin == "" || a.BearerOrigin != token.Origin(base) {
+			return code("token_origin_mismatch")
 		}
 		h.Set("Authorization", "Bearer "+a.Bearer)
 	case a.APIKey != "":
@@ -183,20 +194,49 @@ func (a Auth) apply(h http.Header) error {
 // NewHTTPClient returns the guarded client: TLS 1.3 or newer, no proxy, no
 // redirects. roots nil means the system CA pool; tests pass a test CA.
 // timeout 0 means no client timeout (the caller uses a context).
+// Every dial goes through DialGuard, so a name that resolves (or rebinds) to
+// a metadata, link-local, multicast or unspecified address is refused at
+// connect time. The WebSocket client uses this same client.
 func NewHTTPClient(roots *x509.CertPool, timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: DialGuard}
 	return &http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errRedirect
+			return ErrRedirect
 		},
 		Transport: &http.Transport{
-			Proxy:           nil,
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots},
+			Proxy:               nil,
+			DialContext:         dialer.DialContext,
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots},
+			TLSHandshakeTimeout: 10 * time.Second,
 		},
 	}
 }
 
-var errRedirect = errors.New("redirect_denied")
+// ErrRedirect is returned (wrapped) when a server answers with a redirect.
+var ErrRedirect = errors.New("redirect_denied")
+
+// DialGuard is a net.Dialer Control hook. It refuses the resolved address
+// when it is link-local (which covers 169.254.169.254), the AWS IPv6 metadata
+// address, multicast, or unspecified.
+func DialGuard(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return code("dial_refused")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return code("dial_refused")
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
+		ip.Equal(net.ParseIP("fd00:ec2::254")) {
+		return code("dial_refused")
+	}
+	return nil
+}
 
 // Client is one validated origin plus one credential.
 type Client struct {
@@ -246,7 +286,7 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body []b
 	if err != nil {
 		return 0, nil, code("request_failed")
 	}
-	if err := c.Auth.apply(req.Header); err != nil {
+	if err := c.Auth.apply(req.Header, c.Base); err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Accept", "application/json")
@@ -259,7 +299,7 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body []b
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		if errors.Is(err, errRedirect) {
+		if errors.Is(err, ErrRedirect) {
 			return 0, nil, code("redirect_denied")
 		}
 		return 0, nil, code("request_failed")

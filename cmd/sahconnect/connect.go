@@ -32,6 +32,7 @@ type app struct {
 	sizeFd  int
 	tty     tty.Ops
 	env     config.Env
+	sleep   func(context.Context, time.Duration) error // login poll wait; nil is a timer
 }
 
 func defaultApp() *app {
@@ -50,21 +51,36 @@ func (a *app) errorf(format string, args ...any) {
 	fmt.Fprintf(a.stderr, "sahconnect: "+format+"\n", args...)
 }
 
-// loadAuth applies the precedence: the token file bearer, else
-// SYSTEMAPI_API_KEY. A token file that exists but is unsafe or invalid is an
-// error; it is never silently replaced by the API key.
-func loadAuth(cfg *config.Config) (client.Auth, error) {
-	tok, found, err := token.Read(cfg.TokenFile)
+// loadAuth picks the one credential for base.
+//
+//   - A token file that exists but is unsafe or invalid is an error. It is
+//     never silently replaced by the API key.
+//   - The bearer is used only for the origin that issued it.
+//   - Token for this origin: the bearer wins over SYSTEMAPI_API_KEY.
+//   - Token for another origin: SYSTEMAPI_API_KEY if set, else an error. The
+//     bearer is never sent.
+//
+// note names the credential when the choice was not obvious ("" otherwise).
+func loadAuth(cfg *config.Config, base *url.URL) (auth client.Auth, note string, err error) {
+	tf, found, err := token.Read(cfg.TokenFile)
 	if err != nil {
-		return client.Auth{}, err
+		return client.Auth{}, "", err
 	}
-	if found {
-		return client.Auth{Bearer: tok}, nil
+	origin := token.Origin(base)
+	switch {
+	case found && tf.Origin == origin:
+		if cfg.APIKey != "" {
+			note = "credential: bearer from the token file (it wins over SYSTEMAPI_API_KEY)"
+		}
+		return client.Auth{Bearer: tf.Token, BearerOrigin: tf.Origin}, note, nil
+	case found && cfg.APIKey != "":
+		return client.Auth{APIKey: cfg.APIKey}, "credential: SYSTEMAPI_API_KEY (the token file is for " + tf.Origin + ", not " + origin + ")", nil
+	case found:
+		return client.Auth{}, "", fmt.Errorf("the token file is for %s, not %s: run sahconnect login --url %s, or set SYSTEMAPI_API_KEY", tf.Origin, origin, origin)
+	case cfg.APIKey != "":
+		return client.Auth{APIKey: cfg.APIKey}, "", nil
 	}
-	if cfg.APIKey != "" {
-		return client.Auth{APIKey: cfg.APIKey}, nil
-	}
-	return client.Auth{}, errors.New("not logged in: run sahconnect login, or set SYSTEMAPI_API_KEY")
+	return client.Auth{}, "", errors.New("not logged in: run sahconnect login, or set SYSTEMAPI_API_KEY")
 }
 
 // parseOne parses flags placed before or after exactly one positional arg.
@@ -144,10 +160,13 @@ func (a *app) cmdConnect(args []string) int {
 		a.errorf("systemapi_url: %v", err)
 		return 2
 	}
-	auth, err := loadAuth(cfg)
+	auth, note, err := loadAuth(cfg, base)
 	if err != nil {
 		a.errorf("%v", err)
 		return 2
+	}
+	if note != "" {
+		a.errorf("%s", note)
 	}
 	return a.connectAgent(base, auth, name, *root)
 }
@@ -257,7 +276,7 @@ func (a *app) cmdLogin(args []string) int {
 	ctx, stop := signalContext(nil)
 	defer stop()
 	flow := &login.Flow{
-		Base: base, Username: user, HTTP: client.NewHTTPClient(nil, 20*time.Second),
+		Base: base, Username: user, HTTP: client.NewHTTPClient(nil, 20*time.Second), Sleep: a.sleep,
 		Show: func(p login.Prompt) {
 			fmt.Fprintf(a.stderr, "To sign in as %s, open this URL in a browser and approve:\n\n  %s\n\nCode: %s (expires in %s)\nWaiting for approval...\n",
 				user, p.VerificationURL, p.Code, p.ExpiresIn.Round(time.Second))
@@ -268,12 +287,12 @@ func (a *app) cmdLogin(args []string) int {
 		a.errorf("login failed: %v", err)
 		return 1
 	}
-	if err := token.Write(cfg.TokenFile, res.Token); err != nil {
+	if err := token.Write(cfg.TokenFile, token.Origin(base), res.Token); err != nil {
 		a.errorf("%v", err)
 		return 1
 	}
-	fmt.Fprintf(a.stderr, "Logged in as %s. Token saved to %s (sha256 %s), valid for %s.\n",
-		user, cfg.TokenFile, token.Fingerprint(res.Token), res.ExpiresIn.Round(time.Second))
+	fmt.Fprintf(a.stderr, "Logged in as %s at %s. Token saved to %s (sha256 %s), valid for %s.\n",
+		user, token.Origin(base), cfg.TokenFile, token.Fingerprint(res.Token), res.ExpiresIn.Round(time.Second))
 	return 0
 }
 

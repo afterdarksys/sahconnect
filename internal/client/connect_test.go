@@ -10,6 +10,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/afterdarksys/sahconnect/internal/token"
 )
 
 const bearer = "BEARER-SENTINEL-0123456789"
@@ -57,7 +60,7 @@ func fakeAPI(t *testing.T, seen *[]*http.Request, bodies *[]string) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Client{Base: base, Auth: Auth{Bearer: bearer, APIKey: "KEY-SENTINEL"}}
+	return &Client{Base: base, Auth: Auth{Bearer: bearer, BearerOrigin: token.Origin(base), APIKey: "KEY-SENTINEL"}}
 }
 
 func TestResolve(t *testing.T) {
@@ -108,7 +111,7 @@ func TestTicket(t *testing.T) {
 	var bodies []string
 	c := fakeAPI(t, &seen, &bodies)
 	tk, err := c.Ticket(context.Background(), "h-0001", PurposeOpen)
-	if err != nil || tk.Value != "stk_abc123" || tk.ExpiresAt.IsZero() {
+	if err != nil || tk.Value != "stk_abc123" {
 		t.Fatalf("ticket %+v %v", tk, err)
 	}
 	if seen[0].Method != http.MethodPost || seen[0].URL.RawQuery != "" {
@@ -143,7 +146,7 @@ func TestTicket(t *testing.T) {
 	if _, err := none.Ticket(context.Background(), "h-0001", PurposeOpen); err == nil || err.Error() != "credentials_missing" {
 		t.Fatalf("no credential: %v", err)
 	}
-	bad := &Client{Base: c.Base, Auth: Auth{Bearer: "has space"}}
+	bad := &Client{Base: c.Base, Auth: Auth{Bearer: "has space", BearerOrigin: token.Origin(c.Base)}}
 	if _, err := bad.Resolve(context.Background(), "web1"); err == nil || strings.Contains(err.Error(), "has space") {
 		t.Fatalf("bad bearer: %v", err)
 	}
@@ -172,5 +175,50 @@ func TestTerminalURL(t *testing.T) {
 	}
 	if _, err := TerminalURL(base, "h/../x", "stk_abc", PurposeOpen, 0, 0); err == nil {
 		t.Fatal("path injection accepted")
+	}
+}
+
+func TestBearerNeverSentToAnotherOrigin(t *testing.T) {
+	var seen []*http.Request
+	var bodies []string
+	c := fakeAPI(t, &seen, &bodies)
+	// A production token presented to a staging URL.
+	stolen := &Client{Base: c.Base, Auth: Auth{Bearer: bearer, BearerOrigin: "https://prod.example"}}
+	_, err := stolen.Resolve(context.Background(), "web1")
+	if err == nil || err.Error() != "token_origin_mismatch" || strings.Contains(err.Error(), bearer) {
+		t.Fatalf("mismatch: %v", err)
+	}
+	unbound := &Client{Base: c.Base, Auth: Auth{Bearer: bearer}}
+	if _, err := unbound.Resolve(context.Background(), "web1"); err == nil {
+		t.Fatal("unbound bearer sent")
+	}
+	if len(seen) != 0 {
+		t.Fatal("a request carrying the bearer reached the wrong origin")
+	}
+}
+
+func TestDialGuard(t *testing.T) {
+	for _, a := range []string{"169.254.169.254:80", "[fe80::1]:443", "[fd00:ec2::254]:80", "0.0.0.0:443", "224.0.0.1:80", "[::ffff:169.254.169.254]:80", "nohost"} {
+		if DialGuard("tcp", a, nil) == nil {
+			t.Fatalf("allowed %s", a)
+		}
+	}
+	for _, a := range []string{"127.0.0.1:3003", "[::1]:80", "10.0.0.5:443", "93.184.216.34:443"} {
+		if err := DialGuard("tcp", a, nil); err != nil {
+			t.Fatalf("refused %s: %v", a, err)
+		}
+	}
+	// The guard is on the real transport: a numeric metadata host is refused
+	// at dial time even when the URL checks are bypassed.
+	hc := NewHTTPClient(nil, 2*time.Second)
+	for _, u := range []string{"http://169.254.169.254/latest/meta-data/", "http://[fe80::1]/", "http://0.0.0.0:1/"} {
+		resp, err := hc.Get(u)
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("dialed %s", u)
+		}
+		if !strings.Contains(err.Error(), "dial_refused") {
+			t.Fatalf("%s: %v", u, err)
+		}
 	}
 }

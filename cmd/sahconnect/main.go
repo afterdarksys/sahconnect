@@ -86,24 +86,27 @@ func (a *app) cmdAPI(args []string) int {
 		usage()
 		return 2
 	}
-	cfg, err := config.Load(os.Getenv)
+	cfg, err := config.Load(a.env)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(a.stderr, err.Error())
 		return 2
 	}
 	if strings.TrimSpace(cfg.SystemAPIURL) == "" {
-		fmt.Fprintln(os.Stderr, "missing SYSTEMAPI_URL")
-		return 2
-	}
-	auth, err := loadAuth(cfg)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(a.stderr, "missing SYSTEMAPI_URL")
 		return 2
 	}
 	base, err := client.ValidateBase(cfg.SystemAPIURL)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(a.stderr, err.Error())
 		return 2
+	}
+	auth, note, err := loadAuth(cfg, base)
+	if err != nil {
+		fmt.Fprintln(a.stderr, err.Error())
+		return 2
+	}
+	if note != "" {
+		fmt.Fprintln(a.stderr, note)
 	}
 	path := args[1]
 	query := ""
@@ -113,7 +116,7 @@ func (a *app) cmdAPI(args []string) int {
 	}
 	if len(args) == 3 {
 		if query != "" {
-			fmt.Fprintln(os.Stderr, "usage")
+			fmt.Fprintln(a.stderr, "usage")
 			return 2
 		}
 		query = strings.TrimPrefix(args[2], "?")
@@ -124,7 +127,7 @@ func (a *app) cmdAPI(args []string) int {
 		if statErr == nil && st.Mode()&os.ModeCharDevice == 0 {
 			body, err = io.ReadAll(io.LimitReader(os.Stdin, (256<<10)+1))
 			if err != nil || len(body) > 256<<10 {
-				fmt.Fprintln(os.Stderr, "too_large")
+				fmt.Fprintln(a.stderr, "too_large")
 				return 1
 			}
 		}
@@ -134,13 +137,13 @@ func (a *app) cmdAPI(args []string) int {
 	c := &client.Client{Base: base, Auth: auth}
 	status, resp, err := c.Do(ctx, args[0], path, query, body)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
+		fmt.Fprintln(a.stderr, err.Error())
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "status=%d\n", status)
-	_, _ = os.Stdout.Write(resp)
+	fmt.Fprintf(a.stderr, "status=%d\n", status)
+	_, _ = a.stdout.Write(resp)
 	if len(resp) == 0 || resp[len(resp)-1] != '\n' {
-		fmt.Println()
+		fmt.Fprintln(a.stdout)
 	}
 	if status >= 400 {
 		return 1

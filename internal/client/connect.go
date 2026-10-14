@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Purposes a terminal ticket may carry (terminal protocol §2).
@@ -97,8 +96,7 @@ func (c *Client) Resolve(ctx context.Context, name string) (*Host, error) {
 // Ticket is the single-use terminal ticket. It is a secret for 60 s: it goes
 // only into the terminal URL and is never printed.
 type Ticket struct {
-	Value     string
-	ExpiresAt time.Time
+	Value string
 }
 
 // TicketError is a refused ticket request.
@@ -136,17 +134,14 @@ func (c *Client) Ticket(ctx context.Context, hostID, purpose string) (*Ticket, e
 		return nil, &TicketError{Status: status, Code: eb.Error}
 	}
 	var out struct {
-		Ticket    string `json:"ticket"`
-		ExpiresAt string `json:"expires_at"`
+		Ticket string `json:"ticket"`
 	}
 	if json.Unmarshal(body, &out) != nil || !validSecret(out.Ticket) {
 		return nil, code("bad_response")
 	}
-	t := &Ticket{Value: out.Ticket}
-	if exp, perr := time.Parse(time.RFC3339, out.ExpiresAt); perr == nil {
-		t.ExpiresAt = exp
-	}
-	return t, nil
+	// expires_at is not checked: the server enforces the 60 s lifetime, and a
+	// local check would only add clock-skew failures.
+	return &Ticket{Value: out.Ticket}, nil
 }
 
 // TerminalURL builds the terminal WebSocket URL from a validated base. https
