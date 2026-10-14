@@ -1,15 +1,21 @@
-// Threats: calls the operator's systemapi with a key from the environment.
-// The key is a header, never a query parameter, and it is never copied into
-// an error string. http is accepted only for a loopback IP or the name
-// localhost. https uses the system CA pool and TLS 1.3 or newer. Redirects
-// are refused. Query keys api_key, access_token, token, and device_code are
-// refused. This client does not open a shell of its own. sahconnect ssh
-// executes the adssh binary the operator already has.
+// Threats: calls the operator's systemapi with one credential: the
+// device-login bearer (Authorization: Bearer) or the API key (X-API-Key). The
+// credential is a header, never a query parameter, and it is never copied into
+// an error string. http (and ws) is accepted only for a loopback IP or the name
+// localhost. https and wss use the system CA pool and TLS 1.3 or newer.
+// Redirects are refused and the environment proxy is ignored. Query keys
+// api_key, access_token, token, and device_code are refused. The terminal
+// ticket is the only query secret, it is single-use, and it is never printed.
+// Resolve and Ticket validate host names and host ids against
+// [A-Za-z0-9._-]{1,253} before they reach a URL. Does NOT open a shell itself;
+// sahconnect ssh executes the adssh binary the operator already has.
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -137,9 +143,81 @@ var methods = map[string]struct{}{
 	http.MethodPatch: {}, http.MethodDelete: {},
 }
 
+// Auth carries the credential for one request. Bearer is the device-login
+// token and wins when both are set. APIKey is sent as X-API-Key.
+type Auth struct {
+	Bearer string
+	APIKey string
+}
+
+func validSecret(s string) bool {
+	if strings.TrimSpace(s) == "" || len(s) > 512 {
+		return false
+	}
+	for _, r := range s {
+		if r <= 0x20 || r > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func (a Auth) apply(h http.Header) error {
+	switch {
+	case a.Bearer != "":
+		if !validSecret(a.Bearer) {
+			return code("token_rejected")
+		}
+		h.Set("Authorization", "Bearer "+a.Bearer)
+	case a.APIKey != "":
+		if !validSecret(a.APIKey) {
+			return code("key_rejected")
+		}
+		h.Set("X-API-Key", a.APIKey)
+	default:
+		return code("credentials_missing")
+	}
+	return nil
+}
+
+// NewHTTPClient returns the guarded client: TLS 1.3 or newer, no proxy, no
+// redirects. roots nil means the system CA pool; tests pass a test CA.
+// timeout 0 means no client timeout (the caller uses a context).
+func NewHTTPClient(roots *x509.CertPool, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errRedirect
+		},
+		Transport: &http.Transport{
+			Proxy:           nil,
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots},
+		},
+	}
+}
+
+var errRedirect = errors.New("redirect_denied")
+
+// Client is one validated origin plus one credential.
+type Client struct {
+	Base *url.URL
+	Auth Auth
+	HTTP *http.Client // nil means NewHTTPClient(nil, 20s)
+}
+
 // Do performs one request. key is sent as X-API-Key. Errors are codes.
 func Do(ctx context.Context, base *url.URL, key, method, path, rawQuery string, body []byte) (int, []byte, error) {
-	if base == nil {
+	if strings.TrimSpace(key) == "" {
+		return 0, nil, code("key_rejected")
+	}
+	c := &Client{Base: base, Auth: Auth{APIKey: key}}
+	return c.Do(ctx, method, path, rawQuery, body)
+}
+
+// Do performs one request with the client's credential. Errors are codes and
+// never contain the credential or the URL.
+func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body []byte) (int, []byte, error) {
+	if c == nil || c.Base == nil {
 		return 0, nil, code("invalid_url")
 	}
 	method = strings.ToUpper(method)
@@ -152,47 +230,37 @@ func Do(ctx context.Context, base *url.URL, key, method, path, rawQuery string, 
 	if err := ValidQuery(rawQuery); err != nil {
 		return 0, nil, err
 	}
-	if strings.TrimSpace(key) == "" || len(key) > 512 || strings.ContainsAny(key, " \t\r\n") {
-		return 0, nil, code("key_rejected")
-	}
 	if len(body) > maxBody {
 		return 0, nil, code("too_large")
 	}
-	u := *base
+	u := *c.Base
 	u.Path = path
 	u.RawQuery = rawQuery
 	u.Fragment = ""
 	u.User = nil
 	var rdr io.Reader
 	if body != nil {
-		rdr = strings.NewReader(string(body))
+		rdr = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), rdr)
 	if err != nil {
 		return 0, nil, code("request_failed")
 	}
-	req.Header.Set("X-API-Key", key)
+	if err := c.Auth.apply(req.Header); err != nil {
+		return 0, nil, err
+	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("redirect_denied")
-		},
-		Transport: &http.Transport{
-			Proxy:           nil,
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13},
-		},
+	hc := c.HTTP
+	if hc == nil {
+		hc = NewHTTPClient(nil, 20*time.Second)
 	}
-	resp, err := client.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
-		if strings.Contains(err.Error(), "redirect_denied") {
+		if errors.Is(err, errRedirect) {
 			return 0, nil, code("redirect_denied")
-		}
-		if strings.Contains(err.Error(), key) {
-			return 0, nil, code("request_failed")
 		}
 		return 0, nil, code("request_failed")
 	}
