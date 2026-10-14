@@ -77,7 +77,7 @@ var statusText = map[string]string{
 	"lease_required":        "the host requires a lease for this session",
 	"pty_user_unset":        "the host has no pty_user configured",
 	"recording_unavailable": "session recording is required but adssh is missing on the host; the session was refused",
-	"pty_start_failed":      "the agent could not start the shell",
+	"pty_start_failed":      "the agent could not start the shell (this may be your concurrent session limit; close another session and retry)",
 	"internal":              "internal server error",
 }
 

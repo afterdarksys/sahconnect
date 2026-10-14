@@ -364,3 +364,11 @@ func TestOversizeServerFrameRefused(t *testing.T) {
 		t.Fatal("oversize frame written to stdout")
 	}
 }
+
+func TestStartFailedHintsSessionLimit(t *testing.T) {
+	u, hc := exitServer(t, []byte(`{"type":"pty_status","payload":{"error":"pty_start_failed"}}`), false)
+	code, err := Run(context.Background(), Options{URL: u, HTTP: hc, Stdin: blockForever(), Stdout: io.Discard})
+	if code != ExitFailure || err == nil || !strings.Contains(err.Error(), "session limit") {
+		t.Fatalf("pty_start_failed: %d %v", code, err)
+	}
+}

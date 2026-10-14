@@ -30,11 +30,12 @@ const (
 // cp is a loopback fake of the control plane: device login, resolve, ticket
 // and the terminal socket.
 type cp struct {
-	mu       sync.Mutex
-	auths    []string
-	purposes []string
-	exit     int
-	status   string // pty_status error to send instead of a session
+	mu          sync.Mutex
+	auths       []string
+	purposes    []string
+	exit        int
+	status      string // pty_status error to send instead of a session
+	rateLimited bool   // ws-ticket answers 429
 }
 
 func (f *cp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +66,11 @@ func (f *cp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write([]byte(`{"host_id":"h-1","hostname":"web1","tenant":"t","status":"online"}`))
 	case "/api/v1/ws-ticket":
+		if f.rateLimited {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited"}`))
+			return
+		}
 		var req map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
@@ -381,5 +387,19 @@ func TestTokenFileOnANonTokenFile(t *testing.T) {
 	}
 	if b, err := os.ReadFile(key); err != nil || string(b) != keyBody {
 		t.Fatal("the key file changed")
+	}
+}
+
+func TestTicketRateLimitedExitsOne(t *testing.T) {
+	f := &cp{rateLimited: true}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	env := map[string]string{"XDG_CONFIG_HOME": t.TempDir(), "HOME": t.TempDir(), "SYSTEMAPI_URL": srv.URL, "SYSTEMAPI_API_KEY": "KEY-SENTINEL"}
+	a, _, errb, rec := testApp(t, env, "", true)
+	if code := a.run([]string{"web1"}); code != 1 || !strings.Contains(errb.String(), "too many terminal requests for this host; try again shortly") || rec.raw != 0 {
+		t.Fatalf("429: %d %s %+v", code, errb, rec)
+	}
+	if n := count(f); n != 2 { // resolve + one ticket attempt, no retry
+		t.Fatalf("requests %d", n)
 	}
 }

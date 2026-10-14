@@ -106,6 +106,10 @@ type TicketError struct {
 }
 
 func (e *TicketError) Error() string {
+	if e.Status == http.StatusTooManyRequests {
+		// Contract §2: 429 rate_limited. Reported once; the caller does not retry.
+		return "too many terminal requests for this host; try again shortly"
+	}
 	if e.Code != "" && e.Status != http.StatusUnauthorized {
 		return "ticket refused: " + e.Code + " (" + statusText(e.Status) + ")"
 	}

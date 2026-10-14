@@ -222,3 +222,23 @@ func TestDialGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestTicketRateLimited(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate_limited"}`))
+	}))
+	defer srv.Close()
+	base, _ := ValidateBase(srv.URL)
+	c := &Client{Base: base, Auth: Auth{APIKey: "KEY-SENTINEL"}}
+	_, err := c.Ticket(context.Background(), "h-1", PurposeOpen)
+	var te *TicketError
+	if !errors.As(err, &te) || te.Code != "rate_limited" || err.Error() != "too many terminal requests for this host; try again shortly" {
+		t.Fatalf("429: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("retried: %d calls", calls)
+	}
+}
