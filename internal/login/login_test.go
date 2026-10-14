@@ -16,7 +16,7 @@ import (
 
 const (
 	deviceCode = "DEVICECODE-0123456789abcdefghij"
-	userCode   = "USERCODE-0123456789abcdefghijkl"
+	userCode   = "WDJB-MJHT"
 	access     = "ACCESSTOKEN-0123456789abcdefghij"
 )
 
@@ -24,7 +24,8 @@ type fake struct {
 	mu        sync.Mutex
 	responses []func(w http.ResponseWriter) // one per /oauth/token poll
 	polls     int
-	verifyURL string // override
+	verifyURL *string // override verification_uri
+	userCode  *string // override user_code
 	interval  *int
 	startCode int
 	forms     []url.Values
@@ -48,17 +49,28 @@ func (f *fake) handler(base *string) http.Handler {
 				_, _ = w.Write([]byte(`{"error":"x"}`))
 				return
 			}
-			vu := *base + "/oauth/device/verify?code=" + userCode
-			if f.verifyURL != "" {
-				vu = f.verifyURL
+			vu := *base + "/oauth/device/verify"
+			if f.verifyURL != nil {
+				vu = strings.Replace(*f.verifyURL, "PLACEHOLDER", *base, 1)
+			}
+			uc := userCode
+			if f.userCode != nil {
+				uc = *f.userCode
 			}
 			iv := 5
 			if f.interval != nil {
 				iv = *f.interval
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"device_code": deviceCode, "verification_url": vu, "expires_in": 600, "interval": iv,
-			})
+			resp := map[string]any{
+				"device_code": deviceCode, "user_code": uc, "verification_uri": vu,
+				// Must be ignored: a code-bearing link is what a phisher sends.
+				"verification_uri_complete": "https://evil.example/oauth/device/verify?user_code=" + uc,
+				"expires_in":                600, "interval": iv,
+			}
+			if uc == "OMIT" {
+				delete(resp, "user_code")
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		case "/oauth/token":
 			if r.PostForm.Get("grant_type") != DeviceGrant || r.PostForm.Get("device_code") != deviceCode {
 				w.WriteHeader(http.StatusBadRequest)
@@ -132,10 +144,11 @@ func TestPendingSlowDownSuccess(t *testing.T) {
 			t.Fatalf("sleeps %v want %v", sleeps, want)
 		}
 	}
-	if len(prompts) != 1 || prompts[0].Code != userCode || !strings.Contains(prompts[0].VerificationURL, "/oauth/device/verify?code=") {
+	if len(prompts) != 1 || prompts[0].Code != userCode || !strings.HasSuffix(prompts[0].VerificationURI, "/oauth/device/verify") ||
+		strings.Contains(prompts[0].VerificationURI, "evil") {
 		t.Fatalf("prompt %+v", prompts)
 	}
-	if strings.Contains(prompts[0].VerificationURL, deviceCode) {
+	if strings.Contains(prompts[0].VerificationURI, deviceCode) {
 		t.Fatal("device code shown")
 	}
 	if f.forms[0].Get("username") != "user-1" {
@@ -181,30 +194,44 @@ func TestStartRefusals(t *testing.T) {
 			t.Fatalf("%d: %v", status, err)
 		}
 	}
-	bad := []string{
-		"https://evil.example/oauth/device/verify?code=" + userCode,
-		"http://127.0.0.1:1/oauth/device/verify?code=" + userCode,
-		"PLACEHOLDER/elsewhere?code=" + userCode,
-		"PLACEHOLDER/oauth/device/verify?code=" + userCode + "&device_code=" + deviceCode,
-		"PLACEHOLDER/oauth/device/verify?code=short",
+	str := func(v string) *string { return &v }
+	badURI := []string{
+		"https://evil.example/oauth/device/verify",         // cross-origin
+		"http://127.0.0.1:1/oauth/device/verify",           // other port
+		"PLACEHOLDER/oauth/device/verify?code=" + userCode, // code-bearing
+		"PLACEHOLDER/oauth/device/verify?user_code=" + userCode,
+		"PLACEHOLDER/oauth/device/verify?",
+		"PLACEHOLDER/oauth/device/verify#x",
+		"PLACEHOLDER/elsewhere",
+		"PLACEHOLDER/oauth/device/verify/",
 		"javascript:alert(1)",
+		"",
 	}
-	for _, vu := range bad {
-		f := &fake{responses: []func(http.ResponseWriter){success}}
-		var base string
-		srv := httptest.NewServer(f.handler(&base))
-		base = srv.URL
-		f.verifyURL = strings.Replace(vu, "PLACEHOLDER", srv.URL, 1)
-		u, _ := client.ValidateBase(srv.URL)
-		flow := &Flow{Base: u, Username: "user-1", HTTP: client.NewHTTPClient(nil, 5*time.Second),
-			Sleep: func(context.Context, time.Duration) error { return nil }}
-		_, err := flow.Run(context.Background())
-		srv.Close()
-		if ErrCode(err) != "url_rejected" {
-			t.Fatalf("%s: %v", vu, err)
+	for _, vu := range badURI {
+		f := &fake{verifyURL: str(vu), responses: []func(http.ResponseWriter){success}}
+		_, err, _, prompts := run(t, f)
+		if ErrCode(err) != "url_rejected" || len(prompts) != 0 || f.polls != 0 {
+			t.Fatalf("uri %q: %v prompts=%d polls=%d", vu, err, len(prompts), f.polls)
 		}
-		if f.polls != 0 {
-			t.Fatal("polled after a rejected verification URL")
+	}
+	// userinfo on the same host
+	f := &fake{responses: []func(http.ResponseWriter){success}}
+	var b string
+	srv := httptest.NewServer(f.handler(&b))
+	b = srv.URL
+	f.verifyURL = str(strings.Replace(srv.URL, "http://", "http://u:p@", 1) + "/oauth/device/verify")
+	u0, _ := client.ValidateBase(srv.URL)
+	_, err := (&Flow{Base: u0, Username: "user-1", HTTP: client.NewHTTPClient(nil, 5*time.Second),
+		Sleep: func(context.Context, time.Duration) error { return nil }}).Run(context.Background())
+	srv.Close()
+	if ErrCode(err) != "url_rejected" {
+		t.Fatalf("userinfo: %v", err)
+	}
+	for _, uc := range []string{"OMIT", "", "abcd-efgh", "AB", "ABCD-EFGH-JKLMN", "ABCD EFGH", "ABCD\u00c9FGH", "ABCD_EFGH"} {
+		f := &fake{userCode: str(uc), responses: []func(http.ResponseWriter){success}}
+		_, err, _, prompts := run(t, f)
+		if ErrCode(err) != "user_code_rejected" || len(prompts) != 0 {
+			t.Fatalf("user_code %q: %v", uc, err)
 		}
 	}
 	u, _ := client.ValidateBase("https://cp.example")

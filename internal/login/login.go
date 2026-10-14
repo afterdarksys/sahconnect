@@ -2,14 +2,16 @@
 // controlplane/oauth.js and returns the opaque bearer token.
 //
 // Threats: the device code and the access token are secrets. Neither is
-// printed, logged, or put in a URL; requests are form POST bodies. The
-// verification URL must be on the same origin as the control plane and must
-// not carry device_code or access_token, so a hostile response cannot send the
-// user elsewhere. The HTTP client is the guarded one (TLS 1.3, no proxy, no
+// printed, logged, or put in a URL; requests are form POST bodies. Code entry
+// follows RFC 8628: the user types the short user_code at verification_uri,
+// which must be the control plane's own origin at /oauth/device/verify with no
+// query, fragment, or userinfo, so a hostile response cannot send the user
+// elsewhere or pre-fill a code. verification_uri_complete is ignored on
+// purpose: a link that carries the code is what a phisher would send. The HTTP client is the guarded one (TLS 1.3, no proxy, no
 // redirects); response bodies are capped at 64 KiB. Polling honors the
 // server's interval clamped to 5-300 s and slows by 5 s on slow_down. Any
-// unexpected status or body fails closed. Does NOT verify who approves the code: a stolen
-// verification URL inside its 10-minute TTL is consent (see oauth.js).
+// unexpected status or body fails closed. Does NOT verify who approves the
+// code: a user code someone is talked into entering inside its TTL is consent.
 package login
 
 import (
@@ -32,7 +34,10 @@ const DeviceGrant = "urn:ietf:params:oauth:grant-type:device_code"
 
 const maxBody = 64 << 10
 
-var usernameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,128}$`)
+var (
+	usernameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,128}$`)
+	userCodeRE = regexp.MustCompile(`^[A-Z0-9-]{4,12}$`)
+)
 
 // ValidUsername mirrors oauth.js USER_RE.
 func ValidUsername(u string) bool { return usernameRE.MatchString(u) }
@@ -50,6 +55,10 @@ func (e *Error) Error() string {
 		return "expired_token: the code expired before it was approved; run sahconnect login again"
 	case "oauth_unavailable":
 		return "oauth_unavailable: device login is not configured on this control plane"
+	case "user_code_rejected":
+		return "user_code_rejected: the server sent a missing or malformed user code"
+	case "url_rejected":
+		return "url_rejected: the server's verification_uri is not this control plane's /oauth/device/verify"
 	case "too_many_pending":
 		return "too_many_pending: too many unfinished logins for this user; wait 10 minutes"
 	}
@@ -58,9 +67,9 @@ func (e *Error) Error() string {
 
 func fail(code string) error { return &Error{Code: code} }
 
-// Prompt is what the user must open. Code is the user code from the URL.
+// Prompt is what the user must open and type. Code is the user_code.
 type Prompt struct {
-	VerificationURL string
+	VerificationURI string
 	Code            string
 	ExpiresIn       time.Duration
 }
@@ -81,9 +90,11 @@ type Flow struct {
 
 type startResp struct {
 	DeviceCode      string `json:"device_code"`
-	VerificationURL string `json:"verification_url"`
-	ExpiresIn       int    `json:"expires_in"`
-	Interval        int    `json:"interval"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	// verification_uri_complete is deliberately not decoded.
+	ExpiresIn int `json:"expires_in"`
+	Interval  int `json:"interval"`
 }
 
 type tokenResp struct {
@@ -122,9 +133,11 @@ func (f *Flow) Run(ctx context.Context) (*Result, error) {
 	if json.Unmarshal(body, &start) != nil || len(start.DeviceCode) < 16 || len(start.DeviceCode) > 256 {
 		return nil, fail("device_login_failed")
 	}
-	userCode, err := f.checkVerification(start.VerificationURL)
-	if err != nil {
+	if err := f.checkVerification(start.VerificationURI); err != nil {
 		return nil, err
+	}
+	if !userCodeRE.MatchString(start.UserCode) {
+		return nil, fail("user_code_rejected")
 	}
 	maxWait := f.MaxWait
 	if maxWait <= 0 {
@@ -140,7 +153,7 @@ func (f *Flow) Run(ctx context.Context) (*Result, error) {
 	}
 	interval := clampInterval(time.Duration(secs) * time.Second)
 	if f.Show != nil {
-		f.Show(Prompt{VerificationURL: start.VerificationURL, Code: userCode, ExpiresIn: maxWait})
+		f.Show(Prompt{VerificationURI: start.VerificationURI, Code: start.UserCode, ExpiresIn: maxWait})
 	}
 	form := url.Values{"grant_type": {DeviceGrant}, "device_code": {start.DeviceCode}}
 	for {
@@ -271,33 +284,26 @@ func (f *Flow) post(ctx context.Context, path string, form url.Values) (int, []b
 	return resp.StatusCode, body, nil
 }
 
-// checkVerification requires the verification URL to be on the control
-// plane's own origin, at /oauth/device/verify, with a code and no secrets.
-func (f *Flow) checkVerification(raw string) (string, error) {
-	if raw == "" || len(raw) > 1024 {
-		return "", fail("url_rejected")
+// checkVerification requires verification_uri to be exactly the control
+// plane's origin at /oauth/device/verify: no query (so no code or secret in
+// it), no fragment, no userinfo, printable ASCII only.
+func (f *Flow) checkVerification(raw string) error {
+	if raw == "" || len(raw) > 1024 || strings.ContainsAny(raw, "?#@") {
+		return fail("url_rejected")
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.User != nil || u.Fragment != "" {
-		return "", fail("url_rejected")
-	}
-	if u.Scheme != f.Base.Scheme || !strings.EqualFold(u.Host, f.Base.Host) || u.Path != "/oauth/device/verify" {
-		return "", fail("url_rejected")
-	}
-	q := u.Query()
-	if q.Has("device_code") || q.Has("access_token") || q.Has("token") {
-		return "", fail("url_rejected")
-	}
-	code := q.Get("code")
-	if len(code) < 16 || len(code) > 256 {
-		return "", fail("url_rejected")
-	}
-	for _, r := range raw {
-		if r < 0x21 || r > 0x7e {
-			return "", fail("url_rejected")
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < 0x21 || raw[i] > 0x7e {
+			return fail("url_rejected")
 		}
 	}
-	return code, nil
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery || u.Opaque != "" {
+		return fail("url_rejected")
+	}
+	if u.Path != "/oauth/device/verify" || token.Origin(u) == "" || token.Origin(u) != token.Origin(f.Base) {
+		return fail("url_rejected")
+	}
+	return nil
 }
 
 // ErrCode extracts the code from a login error, or "".

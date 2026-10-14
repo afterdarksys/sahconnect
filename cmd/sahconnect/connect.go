@@ -284,8 +284,8 @@ func (a *app) cmdLogin(args []string) int {
 	flow := &login.Flow{
 		Base: base, Username: user, HTTP: client.NewHTTPClient(nil, 20*time.Second), Sleep: a.sleep,
 		Show: func(p login.Prompt) {
-			fmt.Fprintf(a.stderr, "To sign in as %s, open this URL in a browser and approve:\n\n  %s\n\nCode: %s (expires in %s)\nWaiting for approval...\n",
-				user, p.VerificationURL, p.Code, p.ExpiresIn.Round(time.Second))
+			fmt.Fprintf(a.stderr, "Open %s, sign in with After Dark SSO, and enter code %s\n(signing in as %s; the code expires in %s)\nWaiting for approval...\n",
+				p.VerificationURI, p.Code, user, p.ExpiresIn.Round(time.Second))
 		},
 	}
 	res, err := flow.Run(ctx)

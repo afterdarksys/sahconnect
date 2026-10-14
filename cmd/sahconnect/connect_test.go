@@ -54,8 +54,8 @@ func (f *cp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/oauth/device":
-		_, _ = w.Write([]byte(`{"device_code":"DEVICE-0123456789abcdef","verification_url":"http://` + r.Host +
-			`/oauth/device/verify?code=USERCODE-0123456789abcdef","expires_in":600,"interval":1}`))
+		_, _ = w.Write([]byte(`{"device_code":"DEVICE-0123456789abcdef","user_code":"WDJB-MJHT","verification_uri":"http://` + r.Host +
+			`/oauth/device/verify","verification_uri_complete":"http://` + r.Host + `/oauth/device/verify?user_code=WDJB-MJHT","expires_in":600,"interval":1}`))
 	case "/oauth/token":
 		_, _ = w.Write([]byte(`{"access_token":"` + testBearer + `","token_type":"Bearer","expires_in":3600}`))
 	case "/api/v1/hosts/resolve":
@@ -151,7 +151,8 @@ func TestLoginConnectLogout(t *testing.T) {
 	if strings.Contains(out.String()+errb.String(), testBearer) {
 		t.Fatal("login printed the token")
 	}
-	if !strings.Contains(errb.String(), "/oauth/device/verify?code=USERCODE") || !strings.Contains(errb.String(), "Code: USERCODE") {
+	if !strings.Contains(errb.String(), "Open "+srv.URL+"/oauth/device/verify, sign in with After Dark SSO, and enter code WDJB-MJHT") ||
+		strings.Contains(errb.String(), "DEVICE-0123456789abcdef") || strings.Contains(errb.String(), "?user_code") {
 		t.Fatalf("prompt: %s", errb)
 	}
 	tokPath := filepath.Join(xdg, "sahconnect", "token")
