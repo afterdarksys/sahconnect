@@ -169,6 +169,7 @@ func TestSymlinkForeignOwnerAndParentRefused(t *testing.T) {
 		t.Fatalf("symlink config: %v", err)
 	}
 	secfile.CurrentUID = func() int { return os.Getuid() + 4242 }
+	t.Cleanup(func() { secfile.CurrentUID = os.Getuid })
 	_, err := Load(envMap(map[string]string{"SAHCONNECT_CONFIG": real, "HOME": dir}))
 	secfile.CurrentUID = os.Getuid
 	if err == nil || !strings.Contains(err.Error(), "another user") {
