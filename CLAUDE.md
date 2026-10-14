@@ -2,7 +2,7 @@
 
 Read `AGENTS.md`. It wins if this file disagrees.
 
-sahconnect calls systemapi with `X-API-Key` and execs the `adssh` binary. It does not embed SSH. The suite contract is `~/development/systemapi.io/docs/sah-suite.md`.
+sahconnect opens agent-PTY shells through systemapi, does device login, calls systemapi with a bearer token or `X-API-Key`, and execs the `adssh` binary. It does not embed SSH. The suite contract is `~/development/systemapi.io/docs/sah-suite.md`.
 
 ## Next
 
