@@ -78,6 +78,7 @@ var statusText = map[string]string{
 	"pty_user_unset":        "the host has no pty_user configured",
 	"recording_unavailable": "session recording is required but adssh is missing on the host; the session was refused",
 	"pty_start_failed":      "the agent could not start the shell (this may be your concurrent session limit; close another session and retry)",
+	"root_unavailable":      "this host's agent cannot open root shells (agent not running as root, or recording is not enforced)",
 	"internal":              "internal server error",
 }
 

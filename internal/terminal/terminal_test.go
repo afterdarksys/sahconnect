@@ -372,3 +372,12 @@ func TestStartFailedHintsSessionLimit(t *testing.T) {
 		t.Fatalf("pty_start_failed: %d %v", code, err)
 	}
 }
+
+func TestRootUnavailable(t *testing.T) {
+	u, hc := exitServer(t, []byte(`{"type":"pty_status","payload":{"error":"root_unavailable"}}`), false)
+	code, err := Run(context.Background(), Options{URL: u, HTTP: hc, Stdin: blockForever(), Stdout: io.Discard})
+	want := "this host's agent cannot open root shells (agent not running as root, or recording is not enforced)"
+	if code != ExitFailure || err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "session limit") {
+		t.Fatalf("root_unavailable: %d %v", code, err)
+	}
+}
