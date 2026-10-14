@@ -57,7 +57,10 @@ sahconnect login --url https://systemapi.example --username alice
 ```
 
 1. **Start.** sahconnect POSTs `username` to `/oauth/device` (`controlplane/oauth.js`). The username must be a member. It defaults to `$USER`. The URL defaults to `SYSTEMAPI_URL` or `systemapi_url`.
-2. **Approve.** sahconnect prints the verification URL and the code on stderr. Open the URL and approve it. The URL must be on the same origin as the control plane, at `/oauth/device/verify`. Otherwise login stops with `url_rejected`.
+2. **Enter the code.** The server answers with `user_code` (like `WDJB-MJHT`) and `verification_uri` (RFC 8628). sahconnect prints on stderr: "Open <verification_uri>, sign in with After Dark SSO, and enter code WDJB-MJHT". Type the code yourself; the URL carries no code, so a forwarded link alone cannot approve a login.
+   - `verification_uri` must be this control plane's origin at exactly `/oauth/device/verify`, with no query string, fragment, or userinfo. Otherwise login stops with `url_rejected`.
+   - `user_code` must be 4–12 characters of `[A-Z0-9-]`. Otherwise login stops with `user_code_rejected`.
+   - `verification_uri_complete`, if sent, is ignored on purpose. The device code is never printed.
 3. **Poll.** sahconnect polls `/oauth/token` with the device grant at the server's interval, clamped to 5–300 s (0 means 5 s). `slow_down` adds 5 s to the interval. `expired_token`, `access_denied`, and `invalid_grant` end the login with a non-zero exit. The wait is capped at the code's lifetime, which is 10 minutes.
 4. **Store.** The bearer token and the origin are written to `token_file`:
    - mode 0600, in a directory you own with mode 0700. sahconnect creates a missing directory 0700, and tightens only its own config directory. Any other existing directory that is not 0700 (your home, for example) is refused: `chmod 700` it or move `token_file`;
