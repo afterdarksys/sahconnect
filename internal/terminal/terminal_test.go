@@ -309,3 +309,58 @@ func TestURLGuards(t *testing.T) {
 		}
 	}
 }
+
+// exitServer sends one scripted text or binary frame after the socket opens.
+func exitServer(t *testing.T, frame []byte, binary bool) (*url.URL, *http.Client) {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		typ := websocket.MessageText
+		if binary {
+			typ = websocket.MessageBinary
+		}
+		_ = c.Write(r.Context(), typ, frame)
+		_, _, _ = c.Read(r.Context())
+	}))
+	t.Cleanup(srv.Close)
+	base, _ := client.ValidateBase(srv.URL)
+	u, _ := client.TerminalURL(base, "host-1", ticket, client.PurposeOpen, 0, 0)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	return u, client.NewHTTPClient(pool, 0)
+}
+
+func TestBadExitFramesAreFailures(t *testing.T) {
+	for _, frame := range []string{
+		`{"type":"pty_exit","payload":{"session_id":"s","code":300,"reason":"exited"}}`,
+		`{"type":"pty_exit","payload":{"session_id":"s","reason":"exited"}}`,
+		`{"type":"pty_exit","payload":{"session_id":"s","code":-1,"reason":"exited"}}`,
+		`{"type":"pty_exit","payload":{"session_id":"s","code":0,"reason":"stopped"}}`,
+		`{"type":"pty_exit","payload":{"session_id":"s","code":0,"reason":"<script>"}}`,
+	} {
+		u, hc := exitServer(t, []byte(frame), false)
+		code, err := Run(context.Background(), Options{URL: u, HTTP: hc, Stdin: blockForever(), Stdout: io.Discard})
+		if code != ExitFailure || err == nil {
+			t.Fatalf("%s: code %d err %v", frame, code, err)
+		}
+		if strings.Contains(err.Error(), "<script>") {
+			t.Fatal("server text echoed unsanitized")
+		}
+	}
+}
+
+func TestOversizeServerFrameRefused(t *testing.T) {
+	u, hc := exitServer(t, bytes.Repeat([]byte("A"), maxServerFrame+1), true)
+	out := &syncBuf{}
+	code, err := Run(context.Background(), Options{URL: u, HTTP: hc, Stdin: blockForever(), Stdout: out})
+	if code != ExitFailure || err == nil {
+		t.Fatalf("oversize: code %d err %v", code, err)
+	}
+	if out.String() != "" {
+		t.Fatal("oversize frame written to stdout")
+	}
+}

@@ -8,9 +8,21 @@
 // CAs, no proxy, no redirects). Input frames stay far below the server's
 // 64 KiB limit; server frames are capped at 1 MiB. A pty_status error, a close
 // without pty_exit, or any reason other than "exited" ends with a non-zero
-// exit. Does NOT authenticate the remote shell beyond TLS to the control
-// plane, and does NOT filter what the remote PTY writes to the local terminal
-// (escape sequences pass through, as with ssh).
+// exit.
+//
+// Does NOT filter remote output. Binary frames are written to the local
+// terminal unchanged, exactly as ssh does. A compromised host or control
+// plane can therefore send terminal escape sequences: OSC 52 can set (and on
+// some terminals read) the local clipboard, an answerback/DECRQSS/title
+// report can inject bytes into the local input stream, and sequences can
+// repaint the screen to mislead. Use a terminal that disables OSC 52 reads
+// and answerback for sessions to hosts you do not trust. Does NOT
+// authenticate the remote shell beyond TLS to the control plane.
+//
+// Run is meant for a CLI that calls it once per process: its stdin goroutine
+// stays blocked in Stdin.Read after Run returns (a blocking read cannot be
+// interrupted portably). Bytes that read returns after Run has returned are
+// dropped, so a caller that keeps reading stdin afterwards would lose them.
 package terminal
 
 import (
@@ -49,7 +61,7 @@ func (s Size) Valid() bool { return s.Rows >= 1 && s.Rows <= 1000 && s.Cols >= 1
 type Options struct {
 	URL              *url.URL     // from client.TerminalURL
 	HTTP             *http.Client // guarded client with Timeout 0
-	Stdin            io.Reader
+	Stdin            io.Reader // read until EOF; see the package note on reuse
 	Stdout           io.Writer
 	Resize           <-chan Size // window changes; may be nil
 	HandshakeTimeout time.Duration
